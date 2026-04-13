@@ -9,7 +9,7 @@
  */
 
 import ts from 'typescript';
-import { readFileSync, existsSync, readdirSync } from 'node:fs';
+import { readFileSync, existsSync, readdirSync, statSync } from 'node:fs';
 import { join, relative, dirname, resolve } from 'node:path';
 import { NodeType, RelationshipType, Language } from '../graph/types.js';
 import type { Node, Relationship } from '../graph/types.js';
@@ -222,7 +222,7 @@ function tryResolveFile(basePath: string, projectRoot: string): string | null {
   ];
 
   for (const candidate of candidates) {
-    if (existsSync(candidate)) {
+    if (existsSync(candidate) && statSync(candidate).isFile()) {
       return relative(projectRoot, candidate).replace(/\\/g, '/');
     }
   }

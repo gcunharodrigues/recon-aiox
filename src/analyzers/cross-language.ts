@@ -8,7 +8,7 @@
  */
 
 import { readFileSync, existsSync, readdirSync } from 'node:fs';
-import { join } from 'node:path';
+import { join, relative } from 'node:path';
 import { NodeType, RelationshipType, Language } from '../graph/types.js';
 import type { Node, Relationship } from '../graph/types.js';
 import type { AnalyzerResult } from './types.js';
@@ -311,26 +311,19 @@ function buildHookMappings(
 ): HookMapping[] {
   const mappings: HookMapping[] = [];
 
-  // Scan common hook/lib files that make API calls
-  const apiCallFiles = [
-    'apps/web/src/hooks/use-api.ts',
-    'apps/web/src/hooks/use-guild.ts',
-    'apps/web/src/hooks/use-guilds.ts',
-    'apps/web/src/hooks/use-mutation.ts',
-    'apps/web/src/hooks/use-guild-settings.ts',
-    'apps/web/src/hooks/use-mcp.ts',
-    'apps/web/src/hooks/use-user.ts',
-    'apps/web/src/lib/api-client.ts',
-    'apps/web/src/lib/flow-api.ts',
-    'apps/web/src/lib/mcp-api.ts',
-    'apps/web/src/lib/embed-builder-api.ts',
-    'apps/web/src/lib/analytics-insights-api.ts',
-    'apps/web/src/lib/flow-version-api.ts',
+  // Auto-discover hook and API client files instead of using a hardcoded list.
+  // Scans for files matching use-*.ts(x) (React hooks) and *-api*.ts(x) / api-*.ts(x)
+  // (API client modules) within the project. This makes cross-language analysis work
+  // for any Go + TypeScript codebase, not just a specific monorepo layout.
+  const hookPatterns: RegExp[] = [
+    /^use-.*\.tsx?$/,           // React hooks: use-api.ts, use-guild.ts, etc.
+    /^.*-api.*\.tsx?$/,         // API clients: flow-api.ts, mcp-api.ts, etc.
+    /^api-.*\.tsx?$/,           // API clients: api-client.ts, api-helpers.ts, etc.
   ];
+  const discoveredFiles = findFilesByPattern(projectRoot, hookPatterns);
 
-  for (const relPath of apiCallFiles) {
-    const absPath = join(projectRoot, relPath);
-    if (!existsSync(absPath)) continue;
+  for (const absPath of discoveredFiles) {
+    const relPath = relative(projectRoot, absPath).replace(/\\/g, '/');
 
     const source = readFileSync(absPath, 'utf-8');
 
