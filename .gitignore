@@ -4,3 +4,4 @@ dist/
 *.tsbuildinfo
 *.exe
 .reference/
+docs/
