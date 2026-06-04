@@ -225,7 +225,13 @@ export function extractFromFile(
   }
 
   const parser = setParserLanguage(language);
-  const tree = parser.parse(content);
+  // node-tree-sitter@0.21's parser.parse(string) throws "Invalid argument"
+  // when content exceeds ~32767 bytes. Raise the internal parse buffer well
+  // above any realistic source size so files >32KB (e.g. a 51KB .cjs) parse.
+  // bufferSize is the THIRD arg; the 2nd (oldTree) stays undefined = no
+  // incremental reuse, identical behavior to before for files under the old
+  // limit (the native binding treats undefined as "no old tree"). [Story 5.6]
+  const tree = parser.parse(content, undefined, { bufferSize: 1024 * 1024 });
 
   let query: Parser.Query;
   let matches: Parser.QueryMatch[];

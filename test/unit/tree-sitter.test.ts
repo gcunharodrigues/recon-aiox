@@ -342,6 +342,33 @@ function use() {
     const imports = result.relationships.filter(r => r.type === RelationshipType.IMPORTS);
     expect(imports).toHaveLength(0);
   });
+
+  // Story 5.6 — large-file (>32KB) parse fix. node-tree-sitter@0.21's
+  // parser.parse(string) throws "Invalid argument" when the source exceeds
+  // ~32767 bytes (e.g. tools/os-metrics.cjs at 51KB was silently skipped by
+  // `recon index`). The fix passes a large bufferSize as the third parse arg.
+  // RED pre-fix: extractFromFile throws / yields 0 symbols on a >32KB source.
+  it('parses a >32KB JS source without error and extracts symbols (Story 5.6)', () => {
+    // Build a synthetic JS source string > 32767 bytes with DISTINCT function
+    // names so the extracted symbols are real, not deduped to one.
+    let big = '';
+    let i = 0;
+    while (Buffer.byteLength(big, 'utf8') <= 33000) {
+      big += `function bigFn${i}() { return ${i}; }\n`;
+      i++;
+    }
+    expect(Buffer.byteLength(big, 'utf8')).toBeGreaterThan(32767);
+
+    // Pre-fix this throws "Invalid argument"; post-fix it must not throw.
+    const result = extractFromFile('big.cjs', big, Language.JavaScript);
+
+    const funcs = result.symbols.filter(s => s.type === NodeType.Function);
+    expect(funcs.length).toBeGreaterThanOrEqual(1);
+    // Distinct names prove real extraction across the whole >32KB span.
+    const names = funcs.map(f => f.name);
+    expect(names).toContain('bigFn0');
+    expect(names).toContain(`bigFn${i - 1}`);
+  });
 });
 
 // ─── JavaScript require() → IMPORTS edges + File nodes (Slice B2) ─
