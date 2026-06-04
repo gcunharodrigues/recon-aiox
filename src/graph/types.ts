@@ -15,6 +15,7 @@
  *   C#:     cs:file:, cs:func:, cs:class:, cs:iface:, cs:enum:
  *   Kotlin: kt:file:, kt:func:, kt:class:, kt:iface:, kt:enum:
  *   Swift:  swift:file:, swift:func:, swift:class:, swift:struct:, swift:enum:
+ *   JS:     js:file:, js:func:, js:class:, js:method:
  */
 
 // ─── Enums ──────────────────────────────────────────────────────
@@ -60,6 +61,7 @@ export enum Language {
   CSharp = 'csharp',
   Kotlin = 'kotlin',
   Swift = 'swift',
+  JavaScript = 'javascript',
 }
 
 // ─── Node ───────────────────────────────────────────────────────

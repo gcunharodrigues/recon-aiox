@@ -223,6 +223,127 @@ def _private_helper():
   });
 });
 
+// ─── JavaScript Extraction (Slice B1: symbols + CALLS only) ─────
+
+describe('extractFromFile: JavaScript', () => {
+  const JS_CODE = `
+function add(a, b) {
+  return a + b;
+}
+
+const double = (x) => x * 2;
+
+const named = function () {
+  return add(1, 2);
+};
+
+function* gen() {
+  yield 1;
+}
+
+class Counter extends Base {
+  increment() {
+    this.n++;
+  }
+}
+
+function run() {
+  add();
+}
+`;
+
+  // AC-5b — ABI guard. MUST be the first assertion in this block:
+  // a wrong-ABI grammar load is swallowed silently by loadLanguages()'s
+  // try/catch, producing 0 symbols indistinguishable from "not registered".
+  // This assertion turns that silent failure into a RED test.
+  it('reports JavaScript as available (ABI guard)', () => {
+    expect(isLanguageAvailable(Language.JavaScript)).toBe(true);
+  });
+
+  // AC-5a — extension dispatch
+  it('detects JavaScript files by extension', () => {
+    expect(getLanguageForFile('x.cjs')).toBe(Language.JavaScript);
+    expect(getLanguageForFile('x.js')).toBe(Language.JavaScript);
+    expect(getLanguageForFile('x.mjs')).toBe(Language.JavaScript);
+    expect(getLanguageForFile('x.jsx')).toBe(Language.JavaScript);
+  });
+
+  // AC-5c — symbol extraction from a .cjs fixture
+  it('extracts function, arrow, generator, class and method symbols', () => {
+    const result = extractFromFile('fixture.cjs', JS_CODE, Language.JavaScript);
+
+    const funcs = result.symbols.filter(s => s.type === NodeType.Function);
+    const names = funcs.map(f => f.name);
+    expect(names).toContain('add');     // function_declaration
+    expect(names).toContain('double');  // variable_declarator -> arrow_function
+    expect(names).toContain('named');   // variable_declarator -> function_expression
+    expect(names).toContain('gen');     // generator_function_declaration
+
+    const classes = result.symbols.filter(s => s.type === NodeType.Class);
+    expect(classes.map(c => c.name)).toContain('Counter');
+
+    const methods = result.symbols.filter(s => s.type === NodeType.Method);
+    expect(methods.map(m => m.name)).toContain('increment');
+  });
+
+  it('generates symbol IDs with js: prefix', () => {
+    const result = extractFromFile('fixture.cjs', JS_CODE, Language.JavaScript);
+    expect(result.symbols.length).toBeGreaterThan(0);
+    for (const sym of result.symbols) {
+      expect(sym.id).toMatch(/^js:/);
+    }
+  });
+
+  it('extracts class inheritance (EXTENDS)', () => {
+    const result = extractFromFile('fixture.cjs', JS_CODE, Language.JavaScript);
+    const ext = result.heritage.find(h => h.childName === 'Counter');
+    expect(ext).toBeDefined();
+    expect(ext?.parentName).toBe('Base');
+    expect(ext?.kind).toBe('extends');
+  });
+
+  // AC-5d — CALLS edge between two JS functions
+  it('creates a CALLS edge from run to add', () => {
+    const map = new Map<string, FileExtractionResult>();
+    map.set('fixture.cjs', extractFromFile('fixture.cjs', `
+function add() {
+  return 1;
+}
+
+function run() {
+  add();
+}
+`, Language.JavaScript));
+
+    const result = buildGraphFromExtractions(map);
+    const calls = result.relationships.filter(r => r.type === RelationshipType.CALLS);
+    const runToAdd = calls.find(c => {
+      const source = result.nodes.find(n => n.id === c.sourceId);
+      const target = result.nodes.find(n => n.id === c.targetId);
+      return source?.name === 'run' && target?.name === 'add';
+    });
+    expect(runToAdd).toBeDefined();
+  });
+
+  // AC-5e — B2 boundary guard: a single-file JS fixture yields ZERO IMPORTS
+  // edges. require() is B2 scope; in B1 it flows through as a plain CALLS
+  // edge at most. If an IMPORTS pass is ever added, this fails RED.
+  it('yields ZERO IMPORTS edges (B1/B2 boundary guard)', () => {
+    const map = new Map<string, FileExtractionResult>();
+    map.set('fixture.cjs', extractFromFile('fixture.cjs', `
+const dep = require('./other');
+
+function use() {
+  return dep.run();
+}
+`, Language.JavaScript));
+
+    const result = buildGraphFromExtractions(map);
+    const imports = result.relationships.filter(r => r.type === RelationshipType.IMPORTS);
+    expect(imports).toHaveLength(0);
+  });
+});
+
 // ─── Rust Extraction ────────────────────────────────────────────
 
 describe('extractFromFile: Rust', () => {

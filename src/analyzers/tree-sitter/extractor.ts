@@ -41,6 +41,7 @@ const LANG_PREFIX: Record<Language, string> = {
   [Language.CSharp]: 'cs',
   [Language.Kotlin]: 'kt',
   [Language.Swift]: 'swift',
+  [Language.JavaScript]: 'js',
 };
 
 // ─── Capture → NodeType Mapping ─────────────────────────────────
@@ -97,6 +98,10 @@ function isExported(name: string, language: Language, node?: any): boolean {
     case Language.C:
     case Language.Cpp:
       // C/C++: everything in a header is exported, non-static in .c files
+      return true;
+    case Language.JavaScript:
+      // CommonJS has no `export` keyword on the declaration; everything is a
+      // potential export (module.exports / exports.x). Default to true.
       return true;
     case Language.Ruby:
       // Ruby: methods starting with _ are private by convention

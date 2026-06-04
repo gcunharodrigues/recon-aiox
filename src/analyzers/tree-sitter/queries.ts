@@ -318,6 +318,43 @@ export const SWIFT_QUERIES = `
 (typealias_declaration (type_identifier) @name) @definition.type
 `;
 
+// ─── JavaScript (CommonJS) ──────────────────────────────────────
+//
+// Slice B1: symbols + CALLS only. require()->IMPORTS edges, File nodes,
+// and module.exports export-edges are Slice B2 (a separate story) and are
+// deliberately NOT captured here. A require('x') call flows through as a
+// plain call_expression (i.e. a CALLS edge at most) — correct B1 behavior.
+//
+// Node names below were verified against the installed tree-sitter-javascript
+// grammar (0.21.4) by parsing fixtures and inspecting the s-expression:
+//   function_declaration / generator_function_declaration name: (identifier)
+//   variable_declarator name: (identifier) value: (arrow_function|function_expression)
+//   class_declaration name: (identifier)
+//   class_heritage (identifier)         -- bare identifier, no extends_clause wrapper
+//   class_body (method_definition name: (property_identifier))
+//   call_expression function: (identifier | member_expression property: (property_identifier))
+//
+// Methods are scoped to class_body so object-literal method shorthand (which
+// the grammar also represents as method_definition) is not captured as a Method.
+
+export const JAVASCRIPT_QUERIES = `
+(function_declaration name: (identifier) @name) @definition.function
+(generator_function_declaration name: (identifier) @name) @definition.function
+
+(variable_declarator name: (identifier) @name value: (arrow_function)) @definition.function
+(variable_declarator name: (identifier) @name value: (function_expression)) @definition.function
+
+(class_declaration name: (identifier) @name) @definition.class
+
+(class_body (method_definition name: (property_identifier) @name)) @definition.method
+
+(class_declaration name: (identifier) @heritage.class
+  (class_heritage (identifier) @heritage.extends)) @heritage
+
+(call_expression function: (identifier) @call.name) @call
+(call_expression function: (member_expression property: (property_identifier) @call.name)) @call
+`;
+
 // ─── Query Map ──────────────────────────────────────────────────
 
 export const LANGUAGE_QUERIES: Partial<Record<Language, string>> = {
@@ -331,4 +368,5 @@ export const LANGUAGE_QUERIES: Partial<Record<Language, string>> = {
   [Language.CSharp]: CSHARP_QUERIES,
   [Language.Kotlin]: KOTLIN_QUERIES,
   [Language.Swift]: SWIFT_QUERIES,
+  [Language.JavaScript]: JAVASCRIPT_QUERIES,
 };

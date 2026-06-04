@@ -39,6 +39,10 @@ const EXTENSION_MAP: Record<string, Language> = {
   '.kt': Language.Kotlin,
   '.kts': Language.Kotlin,
   '.swift': Language.Swift,
+  '.js': Language.JavaScript,
+  '.cjs': Language.JavaScript,
+  '.mjs': Language.JavaScript,
+  '.jsx': Language.JavaScript,
 };
 
 /**
@@ -73,6 +77,7 @@ function loadLanguages(): void {
     [Language.CSharp, () => _require('tree-sitter-c-sharp')],
     [Language.Kotlin, () => _require('tree-sitter-kotlin')],
     [Language.Swift, () => _require('tree-sitter-swift')],
+    [Language.JavaScript, () => _require('tree-sitter-javascript')],
   ];
 
   for (const [lang, loader] of loaders) {
