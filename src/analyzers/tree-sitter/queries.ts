@@ -353,6 +353,14 @@ export const JAVASCRIPT_QUERIES = `
 
 (call_expression function: (identifier) @call.name) @call
 (call_expression function: (member_expression property: (property_identifier) @call.name)) @call
+
+; require('./x') → import source (Slice B2). The #eq? predicate (verified
+; honored by node-tree-sitter@0.21) limits this to calls named "require" with a
+; STATIC string-literal argument: dynamic require(var) and require(\`tpl\`) have no
+; (string (string_fragment)) child, so they are not captured here.
+(call_expression
+  function: (identifier) @_req (#eq? @_req "require")
+  arguments: (arguments (string (string_fragment) @import.source))) @import
 `;
 
 // ─── Query Map ──────────────────────────────────────────────────

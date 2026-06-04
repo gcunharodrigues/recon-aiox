@@ -6,11 +6,12 @@
  */
 
 import Parser from 'tree-sitter';
+import path from 'node:path';
 import { NodeType, RelationshipType, Language } from '../../graph/types.js';
 import type { Node, Relationship } from '../../graph/types.js';
 import type { AnalyzerResult } from '../types.js';
 import { LANGUAGE_QUERIES } from './queries.js';
-import { setParserLanguage, isLanguageAvailable } from './parser.js';
+import { setParserLanguage, isLanguageAvailable, getLanguageForFile } from './parser.js';
 
 // ─── Test File Detection ────────────────────────────────────────
 
@@ -447,6 +448,7 @@ export function buildGraphFromExtractions(
   const nodes: Node[] = [];
   const relationships: Relationship[] = [];
   const symbolsByName = new Map<string, ExtractedSymbol[]>();
+  const seenImports = new Set<string>();
 
   // Pass 1: Create nodes and build name index
   for (const [filePath, result] of files) {
@@ -575,7 +577,106 @@ export function buildGraphFromExtractions(
     }
   }
 
+  // Pass 5: JavaScript require() → File→File IMPORTS edges (Slice B2)
+  //
+  // NET-NEW construction. The tree-sitter path emits no File nodes and no
+  // IMPORTS edges for any language; this pass adds both, GATED to JavaScript
+  // ONLY. The JS-only language gate is the single no-regression control: without
+  // it, python/go/rust/java/c/cpp/ruby/php/csharp (which also populate
+  // imports[]) would gain incorrect File nodes + IMPORTS edges and break the
+  // existing-language graph-shape assertions. Modeled on
+  // ts-analyzer.resolveImportPath / tryResolveFile, but resolution is against
+  // the `files` Map keys (project-relative, forward-slash — see analyzer.ts
+  // relativePath contract), NOT the filesystem.
+  const jsFileNodeIds = new Map<string, string>(); // relativePath → File node id
+  const ensureFileNode = (relPath: string): string => {
+    const existing = jsFileNodeIds.get(relPath);
+    if (existing) return existing;
+    const id = `js:file:${relPath}`;
+    jsFileNodeIds.set(relPath, id);
+    // Field parity with the TS-Compiler path's File nodes (ts-analyzer.ts L590)
+    // so downstream consumers (recon_impact, rules.ts orphans/circular_deps)
+    // treat JS File nodes identically: name = basename, exported = true,
+    // 0/0 lines, package = directory.
+    nodes.push({
+      id,
+      type: NodeType.File,
+      name: relPath.split('/').pop() || relPath,
+      file: relPath,
+      startLine: 0,
+      endLine: 0,
+      language: Language.JavaScript,
+      package: getPackage(relPath, Language.JavaScript),
+      exported: true,
+      ...(isTestFile(relPath) ? { isTest: true } : {}),
+    });
+    return id;
+  };
+
+  for (const [filePath, result] of files) {
+    // JS-ONLY GATE — the make-or-break no-regression control.
+    if (getLanguageForFile(filePath) !== Language.JavaScript) continue;
+
+    // Every indexed JS file gets exactly one File node (idempotent by relPath).
+    const fromId = ensureFileNode(filePath);
+
+    for (const imp of result.imports) {
+      const resolved = resolveCjsImport(imp.source, filePath, files);
+      if (!resolved) continue; // bare specifier, dynamic, or unindexed → no edge
+      const toId = ensureFileNode(resolved);
+      const relId = `${fromId}-IMPORTS-${toId}`;
+      if (seenImports.has(relId)) continue; // dedup duplicate requires of same target
+      seenImports.add(relId);
+      relationships.push({
+        id: relId,
+        type: RelationshipType.IMPORTS,
+        sourceId: fromId,
+        targetId: toId,
+        confidence: 1.0,
+      });
+    }
+  }
+
   return { nodes, relationships };
+}
+
+/**
+ * Resolve a CommonJS require() specifier to an indexed project file.
+ *
+ * Mirrors ts-analyzer.tryResolveFile but with CommonJS extensions and resolution
+ * against the in-memory `files` Map (the indexed project surface) rather than the
+ * filesystem. Returns the project-relative, forward-slash key of the target file,
+ * or null when the specifier is non-relative (bare/node-builtin) or resolves to no
+ * indexed file.
+ */
+function resolveCjsImport(
+  source: string,
+  fromRelPath: string,
+  files: Map<string, FileExtractionResult>,
+): string | null {
+  // Non-relative specifier (bare package, node:builtin) → no internal edge.
+  if (!source.startsWith('.')) return null;
+
+  // Resolve against the importing file's directory using POSIX semantics, since
+  // the Map keys are already forward-slash project-relative paths.
+  const fromDir = path.posix.dirname(fromRelPath);
+  const base = path.posix.normalize(path.posix.join(fromDir, source));
+
+  // CJS candidate ladder (exact first, then extension-suffixed, then index files).
+  const candidates = [
+    base,
+    base + '.cjs',
+    base + '.js',
+    base + '.mjs',
+    path.posix.join(base, 'index.cjs'),
+    path.posix.join(base, 'index.js'),
+    path.posix.join(base, 'index.mjs'),
+  ];
+
+  for (const candidate of candidates) {
+    if (files.has(candidate)) return candidate;
+  }
+  return null;
 }
 
 // ─── Helpers ────────────────────────────────────────────────────

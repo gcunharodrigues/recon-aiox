@@ -344,6 +344,167 @@ function use() {
   });
 });
 
+// ─── JavaScript require() → IMPORTS edges + File nodes (Slice B2) ─
+
+describe('buildGraphFromExtractions: JavaScript IMPORTS', () => {
+  // Helper: build a multi-file extraction Map keyed by project-relative path.
+  // The keys mirror analyzer.ts's `relativePath` contract (project-relative,
+  // forward-slash). This is the format buildGraphFromExtractions resolves against.
+  function jsMap(entries: Record<string, string>): Map<string, FileExtractionResult> {
+    const map = new Map<string, FileExtractionResult>();
+    for (const [path, src] of Object.entries(entries)) {
+      map.set(path, extractFromFile(path, src, Language.JavaScript));
+    }
+    return map;
+  }
+
+  function importsOf(result: ReturnType<typeof buildGraphFromExtractions>) {
+    return result.relationships.filter(r => r.type === RelationshipType.IMPORTS);
+  }
+  function fileNodesOf(result: ReturnType<typeof buildGraphFromExtractions>) {
+    return result.nodes.filter(n => n.type === NodeType.File);
+  }
+
+  // AC-6g — NON-JS REGRESSION GUARD (the make-or-break, byte-identical).
+  // A single-file Python fixture, run before vs after the IMPORTS pass, must
+  // produce a byte-identical graph: ZERO File nodes, ZERO IMPORTS edges, and an
+  // unperturbed symbol/CALLS/heritage set. This is the focused proof that the
+  // JS-only language gate holds; if it fails RED the gate is missing/wrong.
+  it('AC-6g: non-JS (Python) fixture yields ZERO File nodes + ZERO IMPORTS edges (byte-identical)', () => {
+    const PY = `
+import os
+from pathlib import Path
+
+class Animal:
+    def speak(self):
+        return make()
+
+def make():
+    return Animal()
+`;
+    const map = new Map<string, FileExtractionResult>();
+    map.set('models/animals.py', extractFromFile('models/animals.py', PY, Language.Python));
+    const result = buildGraphFromExtractions(map);
+
+    // No File nodes for a non-JS language.
+    expect(fileNodesOf(result)).toHaveLength(0);
+    // No IMPORTS edges for a non-JS language (the import[] array exists but must
+    // never be turned into IMPORTS edges by the JS-only-gated pass).
+    expect(importsOf(result)).toHaveLength(0);
+
+    // Byte-identical full-graph snapshot (order-normalized deep equality):
+    // capture the exact node + relationship sets so a stray File node OR a
+    // perturbed symbol/CALLS/heritage edge is caught, not just a count drift.
+    const norm = (g: ReturnType<typeof buildGraphFromExtractions>) => ({
+      nodes: [...g.nodes].map(n => ({ ...n })).sort((a, b) => a.id.localeCompare(b.id)),
+      relationships: [...g.relationships].map(r => ({ ...r })).sort((a, b) => a.id.localeCompare(b.id)),
+    });
+    expect(norm(result)).toMatchSnapshot();
+  });
+
+  // AC-6d — bare specifier (non-relative) → no edge (skipped before ladder).
+  it('AC-6d: bare specifiers (fs, lodash) produce ZERO IMPORTS edges', () => {
+    const result = buildGraphFromExtractions(jsMap({
+      'a.cjs': `const fs = require('fs'); const _ = require('lodash'); function f(){ return fs; }`,
+    }));
+    expect(importsOf(result)).toHaveLength(0);
+  });
+
+  // AC-6e — dynamic require (variable / template) → not captured → no edge.
+  it('AC-6e: dynamic require(variable) and require(template) produce ZERO IMPORTS edges', () => {
+    const result = buildGraphFromExtractions(jsMap({
+      'a.cjs': 'const m = "lock"; const x = require(m); const y = require(`./${m}`);',
+      'lock.cjs': 'function acquire(){}',
+    }));
+    expect(importsOf(result)).toHaveLength(0);
+  });
+
+  // AC-6a — relative require resolves to a File→File IMPORTS edge.
+  it('AC-6a: relative require resolves to a File→File IMPORTS edge a -> b', () => {
+    const result = buildGraphFromExtractions(jsMap({
+      'a.cjs': `const b = require('./b'); function main(){ return b.run(); }`,
+      'b.cjs': `function run(){ return 1; }`,
+    }));
+    const imports = importsOf(result);
+    expect(imports.length).toBeGreaterThanOrEqual(1);
+
+    const aFile = result.nodes.find(n => n.type === NodeType.File && n.id === 'js:file:a.cjs');
+    const bFile = result.nodes.find(n => n.type === NodeType.File && n.id === 'js:file:b.cjs');
+    expect(aFile).toBeDefined();
+    expect(bFile).toBeDefined();
+
+    const edge = imports.find(r => r.sourceId === 'js:file:a.cjs' && r.targetId === 'js:file:b.cjs');
+    expect(edge).toBeDefined();
+    expect(edge?.confidence).toBe(1.0);
+  });
+
+  // AC-6b — CJS ladder: require without extension resolves to the .cjs file.
+  it('AC-6b: require("./c") (no extension) resolves to c.cjs via the CJS ladder', () => {
+    const result = buildGraphFromExtractions(jsMap({
+      'a.cjs': `require('./c');`,
+      'c.cjs': `function helper(){}`,
+    }));
+    const edge = importsOf(result).find(
+      r => r.sourceId === 'js:file:a.cjs' && r.targetId === 'js:file:c.cjs',
+    );
+    expect(edge).toBeDefined();
+  });
+
+  // AC-6c — unresolved relative require → no edge, no throw.
+  it('AC-6c: unresolved relative require("./missing") yields ZERO edges and does not throw', () => {
+    expect(() => {
+      const result = buildGraphFromExtractions(jsMap({
+        'a.cjs': `require('./missing');`,
+      }));
+      expect(importsOf(result)).toHaveLength(0);
+    }).not.toThrow();
+  });
+
+  // AC-6f — mutual require: exactly one File node per file (idempotent), 2 edges.
+  it('AC-6f: mutual require yields exactly 2 File nodes (no dups) and 2 IMPORTS edges', () => {
+    const result = buildGraphFromExtractions(jsMap({
+      'a.cjs': `require('./b'); function fa(){}`,
+      'b.cjs': `require('./a'); function fb(){}`,
+    }));
+    const fileNodes = fileNodesOf(result);
+    const fileIds = fileNodes.map(n => n.id).sort();
+    expect(fileIds).toEqual(['js:file:a.cjs', 'js:file:b.cjs']);
+    // No duplicate File nodes.
+    expect(new Set(fileIds).size).toBe(2);
+
+    const imports = importsOf(result);
+    expect(imports).toHaveLength(2);
+    expect(imports.find(r => r.sourceId === 'js:file:a.cjs' && r.targetId === 'js:file:b.cjs')).toBeDefined();
+    expect(imports.find(r => r.sourceId === 'js:file:b.cjs' && r.targetId === 'js:file:a.cjs')).toBeDefined();
+  });
+
+  // Idempotence: running the build twice over the same input yields the same
+  // node + relationship set (no File-node duplication, deterministic IDs).
+  it('AC-6f: buildGraphFromExtractions is idempotent (re-run = identical graph)', () => {
+    const make = () => buildGraphFromExtractions(jsMap({
+      'a.cjs': `require('./b');`,
+      'b.cjs': `function run(){}`,
+    }));
+    const r1 = make();
+    const r2 = make();
+    const ids = (g: ReturnType<typeof buildGraphFromExtractions>) =>
+      [...g.nodes.map(n => n.id), ...g.relationships.map(r => r.id)].sort();
+    expect(ids(r1)).toEqual(ids(r2));
+  });
+
+  // Sub-directory relative require: resolves across directories.
+  it('resolves a parent-relative require ("../tools/lock") across directories', () => {
+    const result = buildGraphFromExtractions(jsMap({
+      'hooks/a.cjs': `require('../tools/lock');`,
+      'tools/lock.cjs': `function acquire(){}`,
+    }));
+    const edge = importsOf(result).find(
+      r => r.sourceId === 'js:file:hooks/a.cjs' && r.targetId === 'js:file:tools/lock.cjs',
+    );
+    expect(edge).toBeDefined();
+  });
+});
+
 // ─── Rust Extraction ────────────────────────────────────────────
 
 describe('extractFromFile: Rust', () => {
