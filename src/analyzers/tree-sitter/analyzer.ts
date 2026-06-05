@@ -92,6 +92,15 @@ export interface TreeSitterAnalysisResult {
     languages: Record<string, number>;
   };
   fileHashes: Record<string, string>;
+  /**
+   * Project-relative paths of files that were freshly (re)analyzed this run AND
+   * extracted successfully. Consumed by the incremental carry-over in
+   * indexCommand to know which previous-index nodes are stale (their file was
+   * re-parsed) vs. carryable (their file was skipped-unchanged). A parse-FAILED
+   * file is absent here AND absent from fileHashes, so it is neither carried nor
+   * marked seen — it is retried on the next run.
+   */
+  analyzedFiles: string[];
   warnings: AnalyzerWarning[];
 }
 
@@ -111,6 +120,7 @@ export function analyzeTreeSitter(
       result: { nodes: [], relationships: [] },
       stats: { files: 0, symbols: 0, calls: 0, skipped: 0, languages: {} },
       fileHashes: {},
+      analyzedFiles: [],
       warnings: [],
     };
   }
@@ -126,6 +136,7 @@ export function analyzeTreeSitter(
     relativePath: string;
     content: string;
     language: Language;
+    hash: string;
   }
   const filesToProcess: FileToProcess[] = [];
 
@@ -140,9 +151,13 @@ export function analyzeTreeSitter(
     }
 
     const hash = hashContent(content);
-    fileHashes[file.relativePath] = hash;
 
     if (previousHashes && previousHashes[file.relativePath] === hash) {
+      // Unchanged & previously valid → record the hash so it stays "seen" and its
+      // previous-index nodes can be carried over. (Hash for CHANGED files is recorded
+      // only after a successful extraction below — never before — so a parse failure
+      // leaves no stale hash and the file is retried next run.)
+      fileHashes[file.relativePath] = hash;
       skipped++;
       continue;
     }
@@ -151,6 +166,7 @@ export function analyzeTreeSitter(
       relativePath: file.relativePath,
       content,
       language: file.language,
+      hash,
     });
   }
 
@@ -162,6 +178,9 @@ export function analyzeTreeSitter(
     try {
       const result = extractFromFile(file.relativePath, file.content, file.language);
       extractions.set(file.relativePath, result);
+      // Record the hash ONLY after extraction succeeds — a file that throws is left
+      // out of fileHashes so it is re-attempted on the next index (no silent hole).
+      fileHashes[file.relativePath] = file.hash;
       totalCalls += result.calls.length;
 
       const langKey = file.language;
@@ -185,6 +204,7 @@ export function analyzeTreeSitter(
       languages: languageCounts,
     },
     fileHashes,
+    analyzedFiles: [...extractions.keys()],
     warnings,
   };
 }
@@ -206,6 +226,7 @@ export async function analyzeTreeSitterParallel(
       result: { nodes: [], relationships: [] },
       stats: { files: 0, symbols: 0, calls: 0, skipped: 0, languages: {} },
       fileHashes: {},
+      analyzedFiles: [],
       warnings: [],
     };
   }
@@ -221,6 +242,7 @@ export async function analyzeTreeSitterParallel(
     relativePath: string;
     content: string;
     language: Language;
+    hash: string;
   }
   const filesToProcess: FileToProcess[] = [];
 
@@ -235,9 +257,11 @@ export async function analyzeTreeSitterParallel(
     }
 
     const hash = hashContent(content);
-    fileHashes[file.relativePath] = hash;
 
     if (previousHashes && previousHashes[file.relativePath] === hash) {
+      // Unchanged & previously valid → record hash now (stays "seen", nodes carryable).
+      // Changed files get their hash recorded only after a successful parse below.
+      fileHashes[file.relativePath] = hash;
       skipped++;
       continue;
     }
@@ -246,6 +270,7 @@ export async function analyzeTreeSitterParallel(
       relativePath: file.relativePath,
       content,
       language: file.language,
+      hash,
     });
   }
 
@@ -277,15 +302,20 @@ export async function analyzeTreeSitterParallel(
 
     const parseResults = await pool.parseFiles(tasks);
 
+    const hashByPath = new Map(filesToProcess.map(f => [f.relativePath, f.hash]));
     const extractions = new Map<string, FileExtractionResult>();
     let totalCalls = 0;
 
     for (const [filePath, pr] of parseResults) {
       if (pr.error) {
+        // Parse failed under the worker pool → do NOT record its hash, so it is
+        // retried next run instead of being silently marked seen-with-no-symbols.
         warnings.push({ file: filePath, reason: pr.error });
         continue;
       }
       extractions.set(filePath, pr.result);
+      const h = hashByPath.get(filePath);
+      if (h) fileHashes[filePath] = h;
       totalCalls += pr.result.calls.length;
 
       // Count languages
@@ -311,6 +341,7 @@ export async function analyzeTreeSitterParallel(
         languages: languageCounts,
       },
       fileHashes,
+      analyzedFiles: [...extractions.keys()],
       warnings,
     };
   } catch (err) {

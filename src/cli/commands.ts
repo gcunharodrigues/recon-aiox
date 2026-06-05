@@ -23,6 +23,7 @@ import { generateEmbeddingText, isEmbeddable } from '../search/text-generator.js
 import { initEmbedder, embedBatch, disposeEmbedder, DEFAULT_CONFIG } from '../search/embedder.js';
 import { analyzeTreeSitter, analyzeTreeSitterParallel } from '../analyzers/tree-sitter/index.js';
 import { getAvailableLanguages } from '../analyzers/tree-sitter/index.js';
+import { carryOverUnchangedTreeSitter } from '../analyzers/tree-sitter/carryover.js';
 import { detectCommunities } from '../graph/community.js';
 import { NodeType, RelationshipType } from '../graph/types.js';
 import { ReconWatcher } from '../watcher/watcher.js';
@@ -329,6 +330,22 @@ export async function indexCommand(options: { force?: boolean; repo?: string; em
       for (const w of tsitterResult.warnings) {
         console.log(`  ${w.file}: ${w.reason}`);
       }
+    }
+
+    // If incremental, carry over UNCHANGED tree-sitter symbols from the previous index.
+    // Without this, an all-tree-sitter repo (tsModules=0) with no changes produces zero
+    // fresh tree-sitter nodes and the graph collapses to empty — the long-standing
+    // "plain `recon index` empties the graph, only --force works" bug. The TS carry-over
+    // above is TypeScript-only, so tree-sitter languages had no equivalent. See
+    // carryOverUnchangedTreeSitter for the exact carry/drop rules.
+    if (previousIndex && tsitterResult.stats.skipped > 0) {
+      carryOverUnchangedTreeSitter(
+        graph,
+        previousIndex.graph,
+        tsitterLangs,
+        tsitterResult.analyzedFiles,
+        tsitterHashes,
+      );
     }
   }
 
