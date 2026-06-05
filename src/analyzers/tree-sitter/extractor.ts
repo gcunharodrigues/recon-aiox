@@ -618,6 +618,7 @@ export function buildGraphFromExtractions(
   // the `files` Map keys (project-relative, forward-slash — see analyzer.ts
   // relativePath contract), NOT the filesystem.
   const jsFileNodeIds = new Map<string, string>(); // relativePath → File node id
+  const jsImportPairs: Array<[string, string]> = []; // [fromRel, toRel] resolved JS imports (for Pass 6)
   const ensureFileNode = (relPath: string): string => {
     const existing = jsFileNodeIds.get(relPath);
     if (existing) return existing;
@@ -663,7 +664,77 @@ export function buildGraphFromExtractions(
         targetId: toId,
         confidence: 1.0,
       });
+      jsImportPairs.push([filePath, resolved]);
     }
+  }
+
+  // Pass 6: directory-level Package nodes + CONTAINS + Package→Package IMPORTS (BL-041 + BL-042).
+  //
+  // WHY: recon_map reported "0 packages" and rules.findCircularDeps always returned 0 for JS, because
+  // NO analyzer emitted NodeType.Package for *directory* packages (only C++ namespaces produced Package
+  // nodes), and findCircularDeps walks ONLY Package↔Package IMPORTS edges — the Pass-5 File→File
+  // IMPORTS never reached it. This pass derives one Package node per distinct directory of the JS File
+  // nodes, links Package→File via CONTAINS, and LIFTS each cross-directory File→File import to a
+  // Package→Package IMPORTS edge, so both the package overview and cycle detection finally see them.
+  //
+  // JS-ONLY, mirroring Pass 5's gate: only JS builds IMPORTS edges today, so only JS packages can form
+  // import cycles. Other languages have no IMPORTS edges to lift — emitting empty Package nodes for them
+  // would be cosmetic in recon_map and would risk the graph-shape regressions Pass 5's gate prevents.
+  // The C++ namespace Package nodes use the 5-segment symbol id (`<lang>:pkg:<file>:<name>:<line>`) and
+  // are left untouched; these directory packages use the distinct 3-segment `js:pkg:<dir>`.
+  const pkgNameForFile = (relPath: string): string =>
+    getPackage(relPath, Language.JavaScript) || '.';
+  const seenPkgNodes = new Set<string>();
+  const ensurePackageNode = (pkgName: string): string => {
+    const id = `js:pkg:${pkgName}`;
+    if (!seenPkgNodes.has(id)) {
+      seenPkgNodes.add(id);
+      nodes.push({
+        id,
+        type: NodeType.Package,
+        name: pkgName,
+        file: pkgName,
+        startLine: 0,
+        endLine: 0,
+        language: Language.JavaScript,
+        package: pkgName,
+        exported: true,
+      });
+    }
+    return id;
+  };
+
+  // One Package node per distinct directory of the JS File nodes, + Package→File CONTAINS.
+  for (const [relPath, fileId] of jsFileNodeIds) {
+    const pkgId = ensurePackageNode(pkgNameForFile(relPath));
+    relationships.push({
+      id: `${pkgId}-CONTAINS-${fileId}`,
+      type: RelationshipType.CONTAINS,
+      sourceId: pkgId,
+      targetId: fileId,
+      confidence: 1.0,
+    });
+  }
+
+  // Lift cross-directory File→File imports to Package→Package IMPORTS (dedup; skip intra-package,
+  // which is not a cross-package edge and would create a spurious self-loop / false 1-cycle).
+  const seenPkgImports = new Set<string>();
+  for (const [fromRel, toRel] of jsImportPairs) {
+    const fromPkg = pkgNameForFile(fromRel);
+    const toPkg = pkgNameForFile(toRel);
+    if (fromPkg === toPkg) continue;
+    const fromPkgId = ensurePackageNode(fromPkg);
+    const toPkgId = ensurePackageNode(toPkg);
+    const relId = `${fromPkgId}-IMPORTS-${toPkgId}`;
+    if (seenPkgImports.has(relId)) continue;
+    seenPkgImports.add(relId);
+    relationships.push({
+      id: relId,
+      type: RelationshipType.IMPORTS,
+      sourceId: fromPkgId,
+      targetId: toPkgId,
+      confidence: 1.0,
+    });
   }
 
   return { nodes, relationships };

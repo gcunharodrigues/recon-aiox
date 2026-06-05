@@ -14,6 +14,8 @@ import {
   buildGraphFromExtractions,
   LANGUAGE_QUERIES,
 } from '../../src/analyzers/tree-sitter/index.js';
+import { KnowledgeGraph } from '../../src/graph/index.js';
+import { findCircularDeps } from '../../src/mcp/rules.js';
 import type { FileExtractionResult } from '../../src/analyzers/tree-sitter/index.js';
 
 // ─── Language Detection ─────────────────────────────────────────
@@ -529,6 +531,114 @@ def make():
       r => r.sourceId === 'js:file:hooks/a.cjs' && r.targetId === 'js:file:tools/lock.cjs',
     );
     expect(edge).toBeDefined();
+  });
+});
+
+// ─── Directory Package nodes + circular_deps (BL-041 + BL-042) ────
+
+describe('buildGraphFromExtractions: directory Package nodes', () => {
+  function jsMap(entries: Record<string, string>): Map<string, FileExtractionResult> {
+    const map = new Map<string, FileExtractionResult>();
+    for (const [path, src] of Object.entries(entries)) {
+      map.set(path, extractFromFile(path, src, Language.JavaScript));
+    }
+    return map;
+  }
+  const pkgNodes = (r: ReturnType<typeof buildGraphFromExtractions>) =>
+    r.nodes.filter(n => n.type === NodeType.Package);
+  const rels = (r: ReturnType<typeof buildGraphFromExtractions>, t: RelationshipType) =>
+    r.relationships.filter(x => x.type === t);
+  // Load an AnalyzerResult (arrays) into a Map-backed KnowledgeGraph for rule queries.
+  const toKG = (r: ReturnType<typeof buildGraphFromExtractions>) => {
+    const g = new KnowledgeGraph();
+    for (const n of r.nodes) g.addNode(n);
+    for (const x of r.relationships) g.addRelationship(x);
+    return g;
+  };
+
+  it('BL-041: emits one Package node per distinct directory + Package→File CONTAINS', () => {
+    const result = buildGraphFromExtractions(jsMap({
+      'hooks/a.cjs': `function fa(){}`,
+      'hooks/b.cjs': `function fb(){}`,
+      'tools/c.cjs': `function fc(){}`,
+    }));
+    const pkgs = pkgNodes(result).map(n => n.package).sort();
+    expect(pkgs).toEqual(['hooks', 'tools']); // two dirs, hooks deduped to one node
+    const contains = rels(result, RelationshipType.CONTAINS);
+    expect(contains.length).toBe(3); // one per file
+    expect(contains.find(c => c.sourceId === 'js:pkg:hooks' && c.targetId === 'js:file:hooks/a.cjs')).toBeDefined();
+    expect(contains.find(c => c.sourceId === 'js:pkg:tools' && c.targetId === 'js:file:tools/c.cjs')).toBeDefined();
+  });
+
+  it('BL-042: a cross-directory import lifts to a Package→Package IMPORTS edge', () => {
+    const result = buildGraphFromExtractions(jsMap({
+      'hooks/a.cjs': `require('../tools/lock');`,
+      'tools/lock.cjs': `function acquire(){}`,
+    }));
+    const pkgImports = rels(result, RelationshipType.IMPORTS)
+      .filter(r => r.sourceId.startsWith('js:pkg:'));
+    expect(pkgImports.length).toBe(1);
+    expect(pkgImports[0].sourceId).toBe('js:pkg:hooks');
+    expect(pkgImports[0].targetId).toBe('js:pkg:tools');
+  });
+
+  it('BL-042: an intra-directory import does NOT create a Package self-loop', () => {
+    const result = buildGraphFromExtractions(jsMap({
+      'tools/a.cjs': `require('./b');`,
+      'tools/b.cjs': `function fb(){}`,
+    }));
+    const pkgImports = rels(result, RelationshipType.IMPORTS)
+      .filter(r => r.sourceId.startsWith('js:pkg:'));
+    expect(pkgImports.length).toBe(0); // same package → no cross-package edge, no false 1-cycle
+    // The File→File IMPORTS edge is still present (Pass 5 unchanged).
+    expect(rels(result, RelationshipType.IMPORTS).some(r => r.sourceId === 'js:file:tools/a.cjs')).toBe(true);
+  });
+
+  it('BL-042: findCircularDeps detects a two-package import cycle (was always 0 for JS)', () => {
+    // hooks ⇄ tools mutual cross-package require → one package-level cycle.
+    const result = buildGraphFromExtractions(jsMap({
+      'hooks/a.cjs': `require('../tools/b');`,
+      'tools/b.cjs': `require('../hooks/a');`,
+    }));
+    const cycles = findCircularDeps(toKG(result));
+    expect(cycles.length).toBeGreaterThanOrEqual(1);
+    const flat = new Set(cycles.flat());
+    expect(flat.has('hooks')).toBe(true);
+    expect(flat.has('tools')).toBe(true);
+  });
+
+  it('BL-042: findCircularDeps detects a three-package cycle (a -> b -> c -> a)', () => {
+    const result = buildGraphFromExtractions(jsMap({
+      'a/x.cjs': `require('../b/y');`,
+      'b/y.cjs': `require('../c/z');`,
+      'c/z.cjs': `require('../a/x');`,
+    }));
+    const cycles = findCircularDeps(toKG(result));
+    expect(cycles.length).toBeGreaterThanOrEqual(1);
+    const flat = new Set(cycles.flat());
+    for (const p of ['a', 'b', 'c']) expect(flat.has(p)).toBe(true);
+  });
+
+  it('BL-041: a C++ namespace Package and a directory Package coexist without a false cycle', () => {
+    // Same dir holds a C++ file (namespace → Package symbol) and a .cjs (directory Package). The two
+    // use distinct id shapes (cpp:pkg:<file>:<name>:<line> vs js:pkg:<dir>); the namespace package has
+    // no IMPORTS edges, so it must never enter findCircularDeps as a cycle.
+    const result = buildGraphFromExtractions(new Map([
+      ['lib/geo.cpp', extractFromFile('lib/geo.cpp', 'namespace geo {\n  int area() { return 1; }\n}\n', Language.Cpp)],
+      ['lib/x.cjs', extractFromFile('lib/x.cjs', 'function fx(){}', Language.JavaScript)],
+    ]));
+    const ids = result.nodes.filter(n => n.type === NodeType.Package).map(n => n.id);
+    expect(ids).toContain('js:pkg:lib'); // directory package from the .cjs
+    expect(ids.some(id => id.startsWith('cpp:pkg:'))).toBe(true); // C++ namespace package, distinct id
+    expect(findCircularDeps(toKG(result))).toEqual([]); // no IMPORTS among them → no cycle
+  });
+
+  it('BL-041 regression: a non-JS (Python) fixture emits ZERO Package nodes from this pass', () => {
+    const result = buildGraphFromExtractions(new Map([
+      ['src/m.py', extractFromFile('src/m.py', 'import os\ndef f():\n    return 1\n', Language.Python)],
+    ]));
+    // No js:pkg:* directory packages for a Python file (Pass 6 is JS-gated like Pass 5).
+    expect(result.nodes.filter(n => n.id.startsWith('js:pkg:')).length).toBe(0);
   });
 });
 
