@@ -534,7 +534,19 @@ export async function serveCommand(options?: { repo?: string; http?: boolean; po
     if (needsIndex) {
       const reason = !existing ? 'no index found' : 'index is stale';
       console.error(`[recon] Auto-indexing (${reason})...`);
-      await indexCommand({ force: !existing, repo: repoName });
+      // embeddings:false — the serve auto-index must NOT regenerate embeddings.
+      // Embedding generation auto-enables (when @huggingface/transformers is present)
+      // and re-embeds the WHOLE graph synchronously, blocking serve startup by ~2min on
+      // a large graph. No MCP tool consumes embeddings today: recon_find → handleFind →
+      // executeFind is a pure graph name/pattern search, and hybrid-search.ts (BM25+vector)
+      // has no live caller in the stdio or HTTP handler path (both route through
+      // handleToolCall, which never forwards vectorStore to handleFind). So the embed pass
+      // was pure wasted startup cost. Embeddings remain available via an explicit
+      // `recon index` (with embeddings) for whenever hybrid search is actually wired to the
+      // tools — at which point a detached/non-blocking embed + stale-vector guard becomes a
+      // real story (tracked as BL-038 follow-on; blocked on the embedder module-singleton
+      // lifecycle, embedder.ts `_pipeline`).
+      await indexCommand({ force: !existing, repo: repoName, embeddings: false });
     }
 
     // Auto-index external projects
