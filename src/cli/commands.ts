@@ -208,6 +208,20 @@ export async function indexProject(
 
 // ??? index command ???????????????????????????????????????????????
 
+/**
+ * Decide embedding behavior from the tri-state --embeddings / --no-embeddings flag.
+ *   undefined (no flag) → don't embed yet, but AUTO-DETECT @huggingface/transformers
+ *   true   (--embeddings)    → embed, no auto-detect needed
+ *   false  (--no-embeddings) → DO NOT embed and SUPPRESS auto-detect (the load-bearing skip;
+ *                              keeps a grown-graph reindex fast for graph.json-only consumers)
+ * Pure + exported so the suppression contract is unit-testable independent of the index pipeline.
+ */
+export function embeddingDecision(flag: boolean | undefined): { embed: boolean; autoDetect: boolean } {
+  if (flag === true) return { embed: true, autoDetect: false };
+  if (flag === false) return { embed: false, autoDetect: false };
+  return { embed: false, autoDetect: true };
+}
+
 export async function indexCommand(options: { force?: boolean; repo?: string; embeddings?: boolean }): Promise<void> {
   const startTime = performance.now();
   const projectRoot = findProjectRoot();
@@ -408,11 +422,12 @@ export async function indexCommand(options: { force?: boolean; repo?: string; em
   await saveSearchIndex(projectRoot, searchIndex, repoName);
   console.log(`[recon] Search index: ${searchIndex.documentCount} documents`);
 
-  // Embedding pipeline (optional)
-  // Embedding pipeline — auto-detect @huggingface/transformers
-  let doEmbeddings = options.embeddings ?? false;
+  // Embedding pipeline (optional). The 3-state flag decision is extracted to embeddingDecision()
+  // (pure + unit-tested) so the load-bearing --no-embeddings suppression can't silently regress.
+  const { embed: decidedEmbed, autoDetect } = embeddingDecision(options.embeddings);
+  let doEmbeddings = decidedEmbed;
 
-  if (!doEmbeddings) {
+  if (autoDetect) {
     // Auto-detect: if @huggingface/transformers is installed, enable embeddings
     try {
       await (Function('return import("@huggingface/transformers")')() as Promise<any>);

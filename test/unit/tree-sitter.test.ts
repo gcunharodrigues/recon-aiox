@@ -885,7 +885,10 @@ def main():
     const extractions = makePythonExtraction();
     const result = buildGraphFromExtractions(extractions);
 
-    // Cross-file calls with no matching import path get 0.4 (different file, no import relationship)
+    // Cross-file call to a GLOBALLY-UNIQUE name with no import edge resolves at 0.4 (sole definition,
+    // kept BELOW the process.ts trace threshold). Precision change: a NON-unique name with no local def
+    // and no import evidence is now AMBIGUOUS and skipped entirely (no edge) — see the resolution
+    // precedence in buildGraphFromExtractions (same-file 0.7 → import 1.0 → unique 0.4 → else skip).
     const calls = result.relationships.filter(r => r.type === RelationshipType.CALLS);
     for (const call of calls) {
       expect(call.confidence).toBe(0.4);

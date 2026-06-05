@@ -511,3 +511,20 @@ describe('embedder', () => {
     expect(DEFAULT_CONFIG.dimensions).toBe(384);
   });
 });
+
+describe('embeddingDecision (--embeddings / --no-embeddings tri-state)', () => {
+  it('no flag (undefined) → auto-detect, do not pre-embed', async () => {
+    const { embeddingDecision } = await import('../../src/cli/commands.js');
+    expect(embeddingDecision(undefined)).toEqual({ embed: false, autoDetect: true });
+  });
+
+  it('--embeddings (true) → embed, no auto-detect', async () => {
+    const { embeddingDecision } = await import('../../src/cli/commands.js');
+    expect(embeddingDecision(true)).toEqual({ embed: true, autoDetect: false });
+  });
+
+  it('--no-embeddings (false) → do NOT embed and SUPPRESS auto-detect (the load-bearing skip)', async () => {
+    const { embeddingDecision } = await import('../../src/cli/commands.js');
+    expect(embeddingDecision(false)).toEqual({ embed: false, autoDetect: false });
+  });
+});

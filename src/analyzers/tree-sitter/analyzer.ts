@@ -20,6 +20,9 @@ const IGNORE_DIRS = new Set([
   'node_modules', '.git', '.recon', '.reference', 'vendor', 'target',
   'build', 'dist', 'out', '.venv', 'venv', '__pycache__', '.mypy_cache',
   '.pytest_cache', '.cargo', 'bin', 'obj', '.gradle', '.idea',
+  // Noise dot-dirs: kept skipped now that the blanket `startsWith('.')` skip is gone
+  // (see findSourceFiles). These hold tooling/runtime/CI state, not source.
+  '.vscode', '.github', '.husky', '.next', '.turbo', '.cache', '.aiox',
 ]);
 
 const MAX_FILE_SIZE = 1_000_000; // 1 MB
@@ -45,7 +48,11 @@ function findSourceFiles(rootDir: string): SourceFile[] {
 
     for (const entry of entries) {
       if (entry.isDirectory()) {
-        if (IGNORE_DIRS.has(entry.name) || entry.name.startsWith('.')) continue;
+        // Denylist only — the blanket `entry.name.startsWith('.')` skip was removed so that
+        // meaningful dot-dirs (e.g. `.claude/`, `.aiox-core/`) ARE indexed. Noise dot-dirs are
+        // named explicitly in IGNORE_DIRS; non-source files are still excluded by the language
+        // filter (getLanguageForFile) + MAX_FILE_SIZE below.
+        if (IGNORE_DIRS.has(entry.name)) continue;
         walk(join(dir, entry.name));
       } else if (entry.isFile()) {
         const absPath = join(dir, entry.name);

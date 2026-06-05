@@ -479,14 +479,21 @@ export function buildGraphFromExtractions(
     }
   }
 
-  // Build import map: callerFile → Set of imported source paths
+  // Build import map: callerFile → Set of imported TARGET FILE PATHS (resolved).
+  // CRITICAL: resolve each raw require specifier (e.g. './lock') to the indexed file it
+  // points at (e.g. 'tools/lock.cjs') via resolveCjsImport — the SAME resolver Pass 5 uses
+  // for IMPORTS edges. Storing raw `imp.source` here (the old behavior) meant the CALLS
+  // confidence check `callerImports.has(target.file)` could NEVER match (a require string is
+  // not a file path), so every cross-file call collapsed to the low-confidence path and real
+  // import-corroborated callers were indistinguishable from same-name collisions.
   const importsByFile = new Map<string, Set<string>>();
   for (const [filePath, result] of files) {
-    const sources = new Set<string>();
+    const targetFiles = new Set<string>();
     for (const imp of result.imports) {
-      sources.add(imp.source);
+      const resolved = resolveCjsImport(imp.source, filePath, files);
+      if (resolved) targetFiles.add(resolved);
     }
-    importsByFile.set(filePath, sources);
+    importsByFile.set(filePath, targetFiles);
   }
 
   // Pass 2: Resolve calls to CALLS relationships
@@ -503,22 +510,38 @@ export function buildGraphFromExtractions(
       const caller = findEnclosingSymbol(fileSymbols, call.line);
       if (!caller) continue;
 
-      // Pick the best target (prefer different file, then first match)
-      const target = targets.find(t => t.file !== filePath) || targets[0];
-      if (target.id === caller.id) continue; // skip self-calls
-
-      // Contextual confidence scoring based on import evidence:
-      //  1.0 — import exists between source and target file + direct call
-      //  0.7 — same file, no import chain needed
-      //  0.4 — different file, no import relationship
+      // Resolution precedence — PRECISION over recall, to avoid name-collision false edges.
+      // A bare call `add(x)` must NOT silently resolve to some unrelated file's `add` just because
+      // it lives in a different file (the old `find(t => t.file !== filePath)` did exactly that,
+      // manufacturing thousands of bogus cross-file CALLS for common helper names — `add`/`main`/
+      // `esc` — once the graph grew). Resolve in order of evidence:
+      //   1. same-file definition (local call)                          → 0.7
+      //   2. cross-file definition whose file the caller imports         → 1.0
+      //   3. globally UNIQUE name (sole definition anywhere)             → 0.5
+      //   4. otherwise (non-unique name, no local, no import evidence)   → AMBIGUOUS, skip (no edge)
+      const localTarget = targets.find(t => t.file === filePath);
+      const importedTarget = targets.find(t => t.file !== filePath && callerImports.has(t.file));
+      let target: ExtractedSymbol;
       let confidence: number;
-      if (target.file === filePath) {
-        confidence = 0.7; // Same file, no import chain needed
-      } else if (callerImports.has(target.file)) {
-        confidence = 1.0; // Import exists between files + direct call
+      if (localTarget) {
+        target = localTarget;
+        confidence = 0.7;
+      } else if (importedTarget) {
+        target = importedTarget;
+        confidence = 1.0;
+      } else if (targets.length === 1) {
+        target = targets[0];
+        // 0.4 (NOT 0.5) is deliberate: it stays BELOW process.ts minTraceConfidence (0.5) so a
+        // unique-name cross-file edge with no resolved import is recorded but does NOT enter
+        // flow-tracing (detectProcesses → recon flows) — preserving pre-change flow behavior.
+        // NOTE: recon_explain (callers/callees) + recon_impact render ALL CALLS edges regardless of
+        // confidence, so these edges DO appear there; the push hook is the only consumer that gates
+        // (>=1.0). So this value governs flow-trace inclusion specifically, not blanket visibility.
+        confidence = 0.4;
       } else {
-        confidence = 0.4; // Different file, no import relationship
+        continue; // ambiguous: same name in multiple files, no local def, no import evidence → don't guess
       }
+      if (target.id === caller.id) continue; // skip self-calls
 
       const relId = `${caller.id}-CALLS-${target.id}`;
       relationships.push({

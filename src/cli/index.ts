@@ -23,6 +23,7 @@ program
   .option('--force', 'Force full re-index (skip incremental)')
   .option('--repo <name>', 'Store index under a named repo (for multi-repo support)')
   .option('--embeddings', 'Generate vector embeddings for semantic search')
+  .option('--no-embeddings', 'Skip embedding generation (BM25-only; far faster reindex — embeddings are unused by graph.json consumers like the push hook)')
   .action(async (options) => {
     await indexCommand(options);
   });
