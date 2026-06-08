@@ -80,6 +80,9 @@ export async function indexProject(
   const startTime = performance.now();
   console.error(`[recon] Indexing external project: ${resolvedDir} (repo: ${name})...`);
 
+  // Honor the external project's own .recon.json ignore patterns
+  const extConfig = loadConfig(resolvedDir);
+
   // Build graph
   const graph = new KnowledgeGraph();
 
@@ -89,7 +92,7 @@ export async function indexProject(
   let tsitterFiles = 0;
   let tsitterHashes: Record<string, string> = {};
   if (tsitterLangs.length > 0) {
-    const tsitterResult = analyzeTreeSitter(resolvedDir);
+    const tsitterResult = analyzeTreeSitter(resolvedDir, undefined, extConfig.ignore);
     for (const node of tsitterResult.result.nodes) {
       graph.addNode(node);
     }
@@ -188,6 +191,9 @@ export async function indexCommand(options: { force?: boolean; repo?: string; em
 
   console.log(`[recon] Indexing from ${projectRoot}${repoName ? ` (repo: ${repoName})` : ''}...`);
 
+  // Load .recon.json so ignore patterns (e.g. worktree subtrees) prune the walk
+  const config = loadConfig(projectRoot);
+
   // Load previous index for incremental comparison
   const previousIndex = options.force ? null : await loadIndex(projectRoot, repoName);
   const previousHashes = previousIndex?.meta.fileHashes;
@@ -206,7 +212,7 @@ export async function indexCommand(options: { force?: boolean; repo?: string; em
   let tsitterHashes: Record<string, string> = {};
   if (tsitterLangs.length > 0) {
     console.log(`[recon] Analyzing with tree-sitter (${tsitterLangs.join(', ')})...`);
-    const tsitterResult = await analyzeTreeSitterParallel(projectRoot, previousHashes);
+    const tsitterResult = await analyzeTreeSitterParallel(projectRoot, previousHashes, config.ignore);
 
     for (const node of tsitterResult.result.nodes) {
       graph.addNode(node);

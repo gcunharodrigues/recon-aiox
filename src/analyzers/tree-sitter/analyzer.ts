@@ -35,8 +35,19 @@ interface SourceFile {
   language: Language;
 }
 
-function findSourceFiles(rootDir: string): SourceFile[] {
+export function findSourceFiles(rootDir: string, ignore: string[] = []): SourceFile[] {
   const files: SourceFile[] = [];
+
+  // Path-prefix ignore patterns from config (e.g. ["projects", "docs/legacy"]).
+  // Normalized to bare relative prefixes; matched against each dir's rootDir-relative
+  // path so a whole subtree is pruned at the walk (cheaper than per-file filtering).
+  const ignorePrefixes = ignore
+    .map((p) => p.replace(/\\/g, '/').replace(/^\/+|\/+$/g, ''))
+    .filter(Boolean);
+
+  function isIgnoredPath(relPath: string): boolean {
+    return ignorePrefixes.some((p) => relPath === p || relPath.startsWith(p + '/'));
+  }
 
   function walk(dir: string): void {
     let entries;
@@ -53,7 +64,10 @@ function findSourceFiles(rootDir: string): SourceFile[] {
         // named explicitly in IGNORE_DIRS; non-source files are still excluded by the language
         // filter (getLanguageForFile) + MAX_FILE_SIZE below.
         if (IGNORE_DIRS.has(entry.name)) continue;
-        walk(join(dir, entry.name));
+        const childAbs = join(dir, entry.name);
+        const childRel = relative(rootDir, childAbs).replace(/\\/g, '/');
+        if (isIgnoredPath(childRel)) continue;
+        walk(childAbs);
       } else if (entry.isFile()) {
         const absPath = join(dir, entry.name);
         const lang = getLanguageForFile(entry.name);
@@ -113,6 +127,7 @@ export interface TreeSitterAnalysisResult {
 export function analyzeTreeSitter(
   rootDir: string,
   previousHashes?: Record<string, string>,
+  ignore: string[] = [],
 ): TreeSitterAnalysisResult {
   const available = getAvailableLanguages();
   if (available.length === 0) {
@@ -125,7 +140,7 @@ export function analyzeTreeSitter(
     };
   }
 
-  const sourceFiles = findSourceFiles(rootDir);
+  const sourceFiles = findSourceFiles(rootDir, ignore);
   const fileHashes: Record<string, string> = {};
   const languageCounts: Record<string, number> = {};
   const warnings: AnalyzerWarning[] = [];
@@ -219,6 +234,7 @@ export function analyzeTreeSitter(
 export async function analyzeTreeSitterParallel(
   rootDir: string,
   previousHashes?: Record<string, string>,
+  ignore: string[] = [],
 ): Promise<TreeSitterAnalysisResult> {
   const available = getAvailableLanguages();
   if (available.length === 0) {
@@ -231,7 +247,7 @@ export async function analyzeTreeSitterParallel(
     };
   }
 
-  const sourceFiles = findSourceFiles(rootDir);
+  const sourceFiles = findSourceFiles(rootDir, ignore);
   const fileHashes: Record<string, string> = {};
   const languageCounts: Record<string, number> = {};
   const warnings: AnalyzerWarning[] = [];
@@ -277,7 +293,7 @@ export async function analyzeTreeSitterParallel(
   // Below threshold → use sequential path
   const { WORKER_THRESHOLD, TreeSitterPool } = await import('./pool.js');
   if (filesToProcess.length < WORKER_THRESHOLD) {
-    return analyzeTreeSitter(rootDir, previousHashes);
+    return analyzeTreeSitter(rootDir, previousHashes, ignore);
   }
 
   // Try parallel parsing with worker pool
@@ -287,7 +303,7 @@ export async function analyzeTreeSitterParallel(
   if (!poolStarted) {
     console.error('[recon] Worker pool unavailable, using sequential parser.');
     pool.terminate();
-    return analyzeTreeSitter(rootDir, previousHashes);
+    return analyzeTreeSitter(rootDir, previousHashes, ignore);
   }
 
   console.error(`[recon] Worker pool started: ${pool.poolSize} threads for ${filesToProcess.length} files`);
@@ -346,7 +362,7 @@ export async function analyzeTreeSitterParallel(
     };
   } catch (err) {
     console.error(`[recon] Worker pool error: ${err}. Falling back to sequential.`);
-    return analyzeTreeSitter(rootDir, previousHashes);
+    return analyzeTreeSitter(rootDir, previousHashes, ignore);
   } finally {
     pool.terminate();
   }

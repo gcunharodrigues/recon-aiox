@@ -1,4 +1,4 @@
-export { analyzeTreeSitter, analyzeTreeSitterParallel } from './analyzer.js';
+export { analyzeTreeSitter, analyzeTreeSitterParallel, findSourceFiles } from './analyzer.js';
 export type { TreeSitterAnalysisResult } from './analyzer.js';
 export { getLanguageForFile, isLanguageAvailable, getAvailableLanguages } from './parser.js';
 export { extractFromFile, buildGraphFromExtractions } from './extractor.js';
