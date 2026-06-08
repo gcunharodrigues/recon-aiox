@@ -392,7 +392,10 @@ export function extractFromFile(
     if (seenDefs.has(dedupKey)) continue;
     seenDefs.add(dedupKey);
 
-    const id = `${prefix}:${nodeTypeToIdSegment(nodeType)}:${filePath}:${name}:${startLine}`;
+    // Position-free base id (BL-070 R1): omit startLine so edits ABOVE a symbol
+    // don't re-key it. Collisions within the same file are disambiguated by a
+    // source-order ordinal `~N` in the post-pass below.
+    const id = `${prefix}:${nodeTypeToIdSegment(nodeType)}:${filePath}:${name}`;
 
     // Check for Python decorators (matched by name node row)
     const pyDecorators = pyDecoratorsByNameRow.get(nameNode.startPosition.row);
@@ -440,6 +443,26 @@ export function extractFromFile(
       exported: isExported(name, language, defNode || nameNode),
       ...(symbolIsTest ? { isTest: true } : {}),
       ...(attachedDecorators && attachedDecorators.length > 0 ? { decorators: [...attachedDecorators] } : {}),
+    });
+  }
+
+  // ── Position-free id collision disambiguation (BL-070 R1) ──
+  // The base id drops startLine, so two symbols in the same file can collide
+  // (measured ~1.78% — e.g. multiple classes' `constructor` methods in one
+  // file). For each colliding group, sort by startLine ascending and append a
+  // stable source-order ordinal `~0`, `~1`, … Single-member groups keep the
+  // bare base id (no suffix), preserving the position-free property.
+  const byId = new Map<string, ExtractedSymbol[]>();
+  for (const s of symbols) {
+    const group = byId.get(s.id);
+    if (group) group.push(s);
+    else byId.set(s.id, [s]);
+  }
+  for (const [base, group] of byId) {
+    if (group.length < 2) continue;
+    group.sort((a, b) => a.startLine - b.startLine);
+    group.forEach((s, i) => {
+      s.id = `${base}~${i}`;
     });
   }
 

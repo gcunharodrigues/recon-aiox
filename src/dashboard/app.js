@@ -429,7 +429,7 @@ function metaRow(label, value) {
 
 function relItem(nodeId, relType, isIncoming) {
   const node = graphData.nodes.find(n => n.id === nodeId);
-  const name = node ? node.label : nodeId.split(':').pop();
+  const name = node ? node.label : nodeId.split(':').pop().replace(/~\d+$/, '');
   const arrow = isIncoming ? '\u2190' : '\u2192';
   return `<li class="rel-item" data-id="${esc(nodeId)}">
     <span class="rel-arrow">${arrow}</span>
