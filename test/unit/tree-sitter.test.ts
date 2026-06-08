@@ -48,8 +48,14 @@ describe('getLanguageForFile', () => {
     expect(getLanguageForFile('x.hh')).toBe(Language.Cpp);
   });
 
+  it('detects TypeScript/TSX files', () => {
+    expect(getLanguageForFile('file.ts')).toBe(Language.TypeScript);
+    expect(getLanguageForFile('file.mts')).toBe(Language.TypeScript);
+    expect(getLanguageForFile('file.cts')).toBe(Language.TypeScript);
+    expect(getLanguageForFile('component.tsx')).toBe(Language.Tsx);
+  });
+
   it('returns undefined for unsupported extensions', () => {
-    expect(getLanguageForFile('file.ts')).toBeUndefined();
     expect(getLanguageForFile('file.txt')).toBeUndefined();
     expect(getLanguageForFile('Makefile')).toBeUndefined();
   });
@@ -66,9 +72,16 @@ describe('LANGUAGE_QUERIES', () => {
     expect(LANGUAGE_QUERIES[Language.Cpp]).toBeDefined();
   });
 
-  it('does not have queries for Go or TypeScript (handled by dedicated analyzers)', () => {
+  it('does not have queries for Go (handled by a dedicated analyzer)', () => {
     expect(LANGUAGE_QUERIES[Language.Go]).toBeUndefined();
-    expect(LANGUAGE_QUERIES[Language.TypeScript]).toBeUndefined();
+  });
+
+  it('has queries for TypeScript and TSX (now tree-sitter, not the compiler-API path)', () => {
+    expect(LANGUAGE_QUERIES[Language.TypeScript]).toBeDefined();
+    expect(LANGUAGE_QUERIES[Language.Tsx]).toBeDefined();
+    expect(LANGUAGE_QUERIES[Language.TypeScript]).toContain('@definition.function');
+    expect(LANGUAGE_QUERIES[Language.TypeScript]).toContain('@definition.interface');
+    expect(LANGUAGE_QUERIES[Language.TypeScript]).toContain('@import.source');
   });
 
   it('queries contain definition patterns', () => {

@@ -261,7 +261,7 @@ function handleMap(
     if (node.type !== NodeType.Package) continue;
 
     if (langFilter === 'go' && node.language !== Language.Go) continue;
-    if (langFilter === 'typescript' && node.language !== Language.TypeScript) continue;
+    if (langFilter === 'typescript' && node.language !== Language.TypeScript && node.language !== Language.Tsx) continue;
 
     packages.push(node);
   }

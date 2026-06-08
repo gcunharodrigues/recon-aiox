@@ -37,6 +37,7 @@ const LANG_PREFIX: Record<Language, string> = {
   [Language.Cpp]: 'cpp',
   [Language.Go]: 'go',
   [Language.TypeScript]: 'ts',
+  [Language.Tsx]: 'ts',
   [Language.Ruby]: 'rb',
   [Language.PHP]: 'php',
   [Language.CSharp]: 'cs',
@@ -606,27 +607,35 @@ export function buildGraphFromExtractions(
     }
   }
 
-  // Pass 5: JavaScript require() → File→File IMPORTS edges (Slice B2)
+  // Pass 5: ES/CJS import → File→File IMPORTS edges (Slice B2)
   //
   // NET-NEW construction. The tree-sitter path emits no File nodes and no
-  // IMPORTS edges for any language; this pass adds both, GATED to JavaScript
-  // ONLY. The JS-only language gate is the single no-regression control: without
-  // it, python/go/rust/java/c/cpp/ruby/php/csharp (which also populate
-  // imports[]) would gain incorrect File nodes + IMPORTS edges and break the
-  // existing-language graph-shape assertions. Modeled on
-  // ts-analyzer.resolveImportPath / tryResolveFile, but resolution is against
-  // the `files` Map keys (project-relative, forward-slash — see analyzer.ts
-  // relativePath contract), NOT the filesystem.
+  // IMPORTS edges for most languages; this pass adds both, GATED to the
+  // JS/TS module family (JavaScript, TypeScript, Tsx). The gate is the
+  // no-regression control: python/go/rust/java/c/cpp/ruby/php/csharp (which
+  // also populate imports[]) would gain incorrect File nodes + IMPORTS edges
+  // and break the existing-language graph-shape assertions. TS/TSX are included
+  // because the compiler-API TS path (now removed) produced `ts:file:` File
+  // nodes + IMPORTS; routing TS through tree-sitter must preserve that. Node
+  // ids/language are stamped per the file's OWN language (LANG_PREFIX), so JS
+  // files stay byte-identical (`js:file:`) while .ts/.tsx get `ts:file:`.
+  // Modeled on ts-analyzer.resolveImportPath / tryResolveFile, but resolution
+  // is against the `files` Map keys (project-relative, forward-slash — see
+  // analyzer.ts relativePath contract), NOT the filesystem.
+  const importEdgeLanguages = new Set<Language>([
+    Language.JavaScript, Language.TypeScript, Language.Tsx,
+  ]);
   const jsFileNodeIds = new Map<string, string>(); // relativePath → File node id
-  const jsImportPairs: Array<[string, string]> = []; // [fromRel, toRel] resolved JS imports (for Pass 6)
+  const jsImportPairs: Array<[string, string]> = []; // [fromRel, toRel] resolved imports (for Pass 6)
   const ensureFileNode = (relPath: string): string => {
     const existing = jsFileNodeIds.get(relPath);
     if (existing) return existing;
-    const id = `js:file:${relPath}`;
+    const lang = getLanguageForFile(relPath) ?? Language.JavaScript;
+    const id = `${LANG_PREFIX[lang]}:file:${relPath}`;
     jsFileNodeIds.set(relPath, id);
     // Field parity with the TS-Compiler path's File nodes (ts-analyzer.ts L590)
     // so downstream consumers (recon_impact, rules.ts orphans/circular_deps)
-    // treat JS File nodes identically: name = basename, exported = true,
+    // treat these File nodes identically: name = basename, exported = true,
     // 0/0 lines, package = directory.
     nodes.push({
       id,
@@ -635,8 +644,8 @@ export function buildGraphFromExtractions(
       file: relPath,
       startLine: 0,
       endLine: 0,
-      language: Language.JavaScript,
-      package: getPackage(relPath, Language.JavaScript),
+      language: lang,
+      package: getPackage(relPath, lang),
       exported: true,
       ...(isTestFile(relPath) ? { isTest: true } : {}),
     });
@@ -644,10 +653,11 @@ export function buildGraphFromExtractions(
   };
 
   for (const [filePath, result] of files) {
-    // JS-ONLY GATE — the make-or-break no-regression control.
-    if (getLanguageForFile(filePath) !== Language.JavaScript) continue;
+    // GATE — JS/TS module family only (the make-or-break no-regression control).
+    const fileLang = getLanguageForFile(filePath);
+    if (!fileLang || !importEdgeLanguages.has(fileLang)) continue;
 
-    // Every indexed JS file gets exactly one File node (idempotent by relPath).
+    // Every indexed file gets exactly one File node (idempotent by relPath).
     const fromId = ensureFileNode(filePath);
 
     for (const imp of result.imports) {
@@ -677,16 +687,19 @@ export function buildGraphFromExtractions(
   // nodes, links Package→File via CONTAINS, and LIFTS each cross-directory File→File import to a
   // Package→Package IMPORTS edge, so both the package overview and cycle detection finally see them.
   //
-  // JS-ONLY, mirroring Pass 5's gate: only JS builds IMPORTS edges today, so only JS packages can form
-  // import cycles. Other languages have no IMPORTS edges to lift — emitting empty Package nodes for them
-  // would be cosmetic in recon_map and would risk the graph-shape regressions Pass 5's gate prevents.
-  // The C++ namespace Package nodes use the 5-segment symbol id (`<lang>:pkg:<file>:<name>:<line>`) and
-  // are left untouched; these directory packages use the distinct 3-segment `js:pkg:<dir>`.
+  // JS/TS-family only, mirroring Pass 5's gate: only these build IMPORTS edges today, so only their
+  // packages can form import cycles. Other languages have no IMPORTS edges to lift — emitting empty
+  // Package nodes for them would be cosmetic in recon_map and would risk the graph-shape regressions
+  // Pass 5's gate prevents. The C++ namespace Package nodes use the 5-segment symbol id
+  // (`<lang>:pkg:<file>:<name>:<line>`) and are left untouched; these directory packages use the
+  // distinct 3-segment `<prefix>:pkg:<dir>` (prefix per the file's language — `js` or `ts`).
+  const langForFile = (relPath: string): Language =>
+    getLanguageForFile(relPath) ?? Language.JavaScript;
   const pkgNameForFile = (relPath: string): string =>
-    getPackage(relPath, Language.JavaScript) || '.';
+    getPackage(relPath, langForFile(relPath)) || '.';
   const seenPkgNodes = new Set<string>();
-  const ensurePackageNode = (pkgName: string): string => {
-    const id = `js:pkg:${pkgName}`;
+  const ensurePackageNode = (pkgName: string, lang: Language): string => {
+    const id = `${LANG_PREFIX[lang]}:pkg:${pkgName}`;
     if (!seenPkgNodes.has(id)) {
       seenPkgNodes.add(id);
       nodes.push({
@@ -696,7 +709,7 @@ export function buildGraphFromExtractions(
         file: pkgName,
         startLine: 0,
         endLine: 0,
-        language: Language.JavaScript,
+        language: lang,
         package: pkgName,
         exported: true,
       });
@@ -704,9 +717,9 @@ export function buildGraphFromExtractions(
     return id;
   };
 
-  // One Package node per distinct directory of the JS File nodes, + Package→File CONTAINS.
+  // One Package node per distinct directory of the File nodes, + Package→File CONTAINS.
   for (const [relPath, fileId] of jsFileNodeIds) {
-    const pkgId = ensurePackageNode(pkgNameForFile(relPath));
+    const pkgId = ensurePackageNode(pkgNameForFile(relPath), langForFile(relPath));
     relationships.push({
       id: `${pkgId}-CONTAINS-${fileId}`,
       type: RelationshipType.CONTAINS,
@@ -723,8 +736,8 @@ export function buildGraphFromExtractions(
     const fromPkg = pkgNameForFile(fromRel);
     const toPkg = pkgNameForFile(toRel);
     if (fromPkg === toPkg) continue;
-    const fromPkgId = ensurePackageNode(fromPkg);
-    const toPkgId = ensurePackageNode(toPkg);
+    const fromPkgId = ensurePackageNode(fromPkg, langForFile(fromRel));
+    const toPkgId = ensurePackageNode(toPkg, langForFile(toRel));
     const relId = `${fromPkgId}-IMPORTS-${toPkgId}`;
     if (seenPkgImports.has(relId)) continue;
     seenPkgImports.add(relId);
@@ -762,15 +775,23 @@ function resolveCjsImport(
   const fromDir = path.posix.dirname(fromRelPath);
   const base = path.posix.normalize(path.posix.join(fromDir, source));
 
-  // CJS candidate ladder (exact first, then extension-suffixed, then index files).
+  // CJS/ESM/TS candidate ladder (exact first, then extension-suffixed, then index
+  // files). TS/TSX extensions are included so ES imports like `from './helpers'`
+  // resolve to the indexed `helpers.ts` (TS now flows through this same path).
   const candidates = [
     base,
     base + '.cjs',
     base + '.js',
     base + '.mjs',
+    base + '.ts',
+    base + '.tsx',
+    base + '.mts',
+    base + '.cts',
     path.posix.join(base, 'index.cjs'),
     path.posix.join(base, 'index.js'),
     path.posix.join(base, 'index.mjs'),
+    path.posix.join(base, 'index.ts'),
+    path.posix.join(base, 'index.tsx'),
   ];
 
   for (const candidate of candidates) {

@@ -3,7 +3,7 @@
  *
  * Watches source files with chokidar. On change:
  * 1. Remove old nodes for the file (graph.removeNodesByFile)
- * 2. Re-parse the single file with ts.createSourceFile or tree-sitter
+ * 2. Re-parse the single file with tree-sitter
  * 3. Insert new nodes + edges in-place
  *
  * The graph is mutated directly so MCP handlers see updates immediately.
@@ -11,23 +11,37 @@
 
 import chokidar from 'chokidar';
 import type { FSWatcher } from 'chokidar';
-import ts from 'typescript';
-import { readFileSync, existsSync } from 'node:fs';
+import { readFileSync } from 'node:fs';
 import { join, relative, resolve, basename } from 'node:path';
 import { KnowledgeGraph } from '../graph/graph.js';
-import { NodeType, RelationshipType, Language } from '../graph/types.js';
+import { NodeType, RelationshipType } from '../graph/types.js';
 import { extractFromFile } from '../analyzers/tree-sitter/extractor.js';
 import { getLanguageForFile, isLanguageAvailable } from '../analyzers/tree-sitter/parser.js';
 import { saveIndex } from '../storage/store.js';
 import { SqliteStore } from '../storage/sqlite.js';
 import type { IndexMeta } from '../storage/types.js';
-import {
-  analyzeTypeScriptFile,
-  findEnclosingSymbol,
-  findEnclosingExtracted,
-  getPackageFromPath,
-  resolveImportTarget,
-} from './watcher-ts.js';
+
+/**
+ * Find narrowest enclosing function/method for tree-sitter extracted symbols.
+ * (Inlined from the removed watcher-ts.ts — the only helper the surviving
+ * tree-sitter surgical-update path still needs after the compiler-API TS path
+ * was dropped.)
+ */
+function findEnclosingExtracted(
+  symbols: Array<{ id: string; name: string; type: NodeType; startLine: number; endLine: number }>,
+  line: number,
+): { id: string; name: string } | null {
+  let best: typeof symbols[0] | null = null;
+  for (const sym of symbols) {
+    if (sym.type !== NodeType.Function && sym.type !== NodeType.Method) continue;
+    if (sym.startLine <= line && sym.endLine >= line) {
+      if (!best || (sym.endLine - sym.startLine) < (best.endLine - best.startLine)) {
+        best = sym;
+      }
+    }
+  }
+  return best;
+}
 
 // ─── Types ───────────────────────────────────────────────────────
 
@@ -67,11 +81,11 @@ export const watcherStatus: WatcherStatus = {
 
 // ─── Supported Extensions ────────────────────────────────────────
 
-const TS_EXTENSIONS = new Set(['.ts', '.tsx']);
 const TREE_SITTER_EXTENSIONS = new Set([
   '.go', '.py', '.rs', '.java', '.c', '.cpp', '.rb', '.php', '.kt', '.swift', '.cs',
+  '.ts', '.tsx', '.mts', '.cts',
 ]);
-const ALL_EXTENSIONS = new Set([...TS_EXTENSIONS, ...TREE_SITTER_EXTENSIONS]);
+const ALL_EXTENSIONS = new Set([...TREE_SITTER_EXTENSIONS]);
 
 function getExtension(path: string): string {
   const dot = path.lastIndexOf('.');
@@ -269,9 +283,7 @@ export class ReconWatcher {
         return;
       }
 
-      if (TS_EXTENSIONS.has(ext)) {
-        this.surgicalUpdateTS(absPath, relPath, repoName, project.dir);
-      } else if (TREE_SITTER_EXTENSIONS.has(ext)) {
+      if (TREE_SITTER_EXTENSIONS.has(ext)) {
         this.surgicalUpdateTreeSitter(absPath, relPath, repoName);
       }
 
@@ -373,182 +385,6 @@ export class ReconWatcher {
         });
       }
     }
-  }
-
-  // ─── TypeScript Surgical Update ────────────────────────────────
-
-  private surgicalUpdateTS(
-    absPath: string,
-    relPath: string,
-    repoName: string,
-    projectDir: string,
-  ): void {
-    if (!existsSync(absPath)) return;
-
-    // 1. Collect incoming callers BEFORE removal
-    const { incomingCallers } = this.collectIncomingCallers(relPath);
-
-    // 2. Remove old nodes + relationships
-    this.graph.removeNodesByFile(relPath);
-
-    // 3. Re-parse the single file
-    let source: string;
-    try {
-      source = readFileSync(absPath, 'utf-8');
-    } catch {
-      return;
-    }
-
-    const sf = ts.createSourceFile(
-      relPath,
-      source,
-      ts.ScriptTarget.ES2022,
-      true,
-      absPath.endsWith('.tsx') ? ts.ScriptKind.TSX : ts.ScriptKind.TS,
-    );
-
-    // 4. Analyze the file (delegated to watcher-ts.ts)
-    const analysis = analyzeTypeScriptFile(sf);
-
-    // 5. Derive package from path
-    const pkg = getPackageFromPath(relPath);
-
-    // 6. Create File node
-    const fileNodeId = `ts:file:${relPath}`;
-    this.graph.addNode({
-      id: fileNodeId,
-      type: NodeType.File,
-      name: relPath.split('/').pop() || relPath,
-      file: relPath,
-      startLine: 0,
-      endLine: 0,
-      language: Language.TypeScript,
-      package: pkg,
-      exported: true,
-      repo: repoName,
-    });
-
-    // 7. Create symbol nodes
-    const relCounter = { value: Date.now() };
-    const newSymbolMap = new Map<string, string>();
-
-    for (const sym of analysis.symbols) {
-      let nodeType: NodeType;
-      let idPrefix: string;
-
-      switch (sym.kind) {
-        case 'component':
-          nodeType = NodeType.Component;
-          idPrefix = 'ts:comp';
-          break;
-        case 'function':
-          nodeType = NodeType.Function;
-          idPrefix = 'ts:func';
-          break;
-        case 'type':
-          nodeType = NodeType.Type;
-          idPrefix = 'ts:type';
-          break;
-        case 'interface':
-          nodeType = NodeType.Interface;
-          idPrefix = 'ts:iface';
-          break;
-      }
-
-      const nodeId = `${idPrefix}:${relPath}:${sym.name}`;
-
-      this.graph.addNode({
-        id: nodeId,
-        type: nodeType,
-        name: sym.name,
-        file: relPath,
-        startLine: sym.startLine,
-        endLine: sym.endLine,
-        language: Language.TypeScript,
-        package: pkg,
-        exported: sym.isExported,
-        isDefault: sym.isDefault,
-        repo: repoName,
-      });
-
-      this.graph.addRelationship({
-        id: `rel:watch:${++relCounter.value}`,
-        type: RelationshipType.DEFINES,
-        sourceId: fileNodeId,
-        targetId: nodeId,
-        confidence: 1.0,
-      });
-
-      newSymbolMap.set(sym.name, nodeId);
-    }
-
-    // 8. IMPORT edges
-    for (const imp of analysis.imports) {
-      if (imp.isTypeOnly) continue;
-      const targetFileId = resolveImportTarget(imp.specifier, absPath, projectDir);
-      if (targetFileId && this.graph.getNode(targetFileId)) {
-        this.graph.addRelationship({
-          id: `rel:watch:${++relCounter.value}`,
-          type: RelationshipType.IMPORTS,
-          sourceId: fileNodeId,
-          targetId: targetFileId,
-          confidence: 1.0,
-        });
-      }
-    }
-
-    // 9. CALLS edges
-    for (const call of analysis.calls) {
-      const callerSym = findEnclosingSymbol(analysis.symbols, call.line);
-      if (!callerSym) continue;
-
-      const callerPrefix = callerSym.kind === 'component' ? 'ts:comp' : 'ts:func';
-      const callerNodeId = `${callerPrefix}:${relPath}:${callerSym.name}`;
-
-      const targets = this.graph.findByName(call.calleeName);
-      const target = targets.find(n =>
-        n.file !== relPath && n.exported &&
-        (n.type === NodeType.Function || n.type === NodeType.Component),
-      );
-
-      if (target && target.id !== callerNodeId) {
-        this.graph.addRelationship({
-          id: `rel:watch:${++relCounter.value}`,
-          type: RelationshipType.CALLS,
-          sourceId: callerNodeId,
-          targetId: target.id,
-          confidence: 0.7,
-        });
-      }
-    }
-
-    // 10. USES_COMPONENT edges
-    for (const jsxName of analysis.jsxComponents) {
-      if (jsxName.includes('.')) continue;
-
-      const targets = this.graph.findByName(jsxName);
-      const target = targets.find(n => n.type === NodeType.Component && n.file !== relPath);
-
-      if (target) {
-        const sourceComp = analysis.symbols.find(s => s.kind === 'component' && s.isExported);
-        const sourceId = sourceComp
-          ? `ts:comp:${relPath}:${sourceComp.name}`
-          : fileNodeId;
-
-        if (target.id !== sourceId) {
-          this.graph.addRelationship({
-            id: `rel:watch:${++relCounter.value}`,
-            type: RelationshipType.USES_COMPONENT,
-            sourceId,
-            targetId: target.id,
-            confidence: 0.9,
-          });
-        }
-      }
-    }
-
-    // 11. Re-link incoming callers
-    this.relinkCallers(incomingCallers, newSymbolMap, relCounter);
   }
 
   // ─── Tree-sitter Surgical Update ───────────────────────────────

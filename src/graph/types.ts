@@ -51,6 +51,7 @@ export enum RelationshipType {
 export enum Language {
   Go = 'go',
   TypeScript = 'typescript',
+  Tsx = 'tsx',
   Python = 'python',
   Rust = 'rust',
   Java = 'java',

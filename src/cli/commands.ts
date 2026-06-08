@@ -8,7 +8,6 @@ import { execSync } from 'node:child_process';
 import { rmSync, existsSync } from 'node:fs';
 import { join, resolve, basename } from 'node:path';
 import { KnowledgeGraph } from '../graph/graph.js';
-import { analyzeTypeScript } from '../analyzers/ts-analyzer.js';
 import { buildCrossLanguageEdges, extractGoRoutes } from '../analyzers/cross-language.js';
 import type { APIRoute } from '../analyzers/cross-language.js';
 import { saveIndex, saveSearchIndex, saveEmbeddings, loadIndex, loadEmbeddings, loadAllRepos } from '../storage/store.js';
@@ -29,29 +28,6 @@ import { NodeType, RelationshipType } from '../graph/types.js';
 import { ReconWatcher } from '../watcher/watcher.js';
 import type { ProjectDir } from '../watcher/watcher.js';
 import { loadConfig, mergeWithCLI } from '../config/config.js';
-
-/**
- * Auto-detect where TypeScript source files live.
- * Probes: apps/web/src → src/ → root (tsconfig.json present)
- */
-function detectWebAppPath(projectRoot: string): string {
-  // Monorepo: apps/web/src/
-  if (existsSync(join(projectRoot, 'apps', 'web', 'src'))) {
-    return 'apps/web';
-  }
-  // Standard: ./src/ with tsconfig at root
-  if (existsSync(join(projectRoot, 'src')) && existsSync(join(projectRoot, 'tsconfig.json'))) {
-    return '.';
-  }
-  // Other common mono patterns
-  for (const candidate of ['packages/app', 'packages/web', 'app']) {
-    if (existsSync(join(projectRoot, candidate, 'src'))) {
-      return candidate;
-    }
-  }
-  // Fallback
-  return '.';
-}
 
 /**
  * Find project root by walking up to find go.mod.
@@ -107,25 +83,7 @@ export async function indexProject(
   // Build graph
   const graph = new KnowledgeGraph();
 
-  // TypeScript analysis
-  const webAppRelPath = detectWebAppPath(resolvedDir);
-  const tsResult = await analyzeTypeScript(resolvedDir, webAppRelPath);
-
-  for (const node of tsResult.result.nodes) {
-    graph.addNode(node);
-  }
-  for (const rel of tsResult.result.relationships) {
-    graph.addRelationship(rel);
-  }
-
-  if (tsResult.warnings.length > 0) {
-    console.error(`[recon] ${tsResult.warnings.length} TS file(s) skipped due to errors:`);
-    for (const w of tsResult.warnings) {
-      console.error(`  ${w.file}: ${w.reason}`);
-    }
-  }
-
-  // Tree-sitter analysis
+  // Tree-sitter analysis (TS/TSX now flow through here like every other grammar)
   const tsitterLangs = getAvailableLanguages();
   let tsitterSymbols = 0;
   let tsitterFiles = 0;
@@ -171,14 +129,14 @@ export async function indexProject(
     gitCommit: git.commit,
     gitBranch: git.branch,
     stats: {
-      tsModules: tsResult.stats.files + tsResult.stats.skipped,
-      tsSymbols: tsResult.stats.components + tsResult.stats.functions,
+      tsModules: 0,
+      tsSymbols: 0,
       treeSitterFiles: tsitterFiles,
       treeSitterSymbols: tsitterSymbols,
       relationships: graph.relationshipCount,
       indexTimeMs: elapsed,
     },
-    fileHashes: { ...tsResult.fileHashes, ...tsitterHashes },
+    fileHashes: { ...tsitterHashes },
     apiRoutes: crossLangResult.routes.map(r => ({
       method: r.method,
       pattern: r.pattern,
@@ -241,61 +199,7 @@ export async function indexCommand(options: { force?: boolean; repo?: string; em
   // Build graph
   const graph = new KnowledgeGraph();
 
-  // Run TypeScript analysis — auto-detect source location
-  console.log('[recon] Analyzing TypeScript...');
-  const webAppRelPath = detectWebAppPath(projectRoot);
-  const tsResult = await analyzeTypeScript(projectRoot, webAppRelPath, previousHashes);
-
-  if (tsResult.stats.skipped > 0) {
-    console.log(
-      `[recon] Incremental TS: analyzed ${tsResult.stats.files} files, ` +
-      `skipped ${tsResult.stats.skipped} unchanged`,
-    );
-  }
-
-  // Add TS nodes and edges
-  for (const node of tsResult.result.nodes) {
-    graph.addNode(node);
-  }
-  for (const rel of tsResult.result.relationships) {
-    graph.addRelationship(rel);
-  }
-
-  // Print TS warnings
-  if (tsResult.warnings.length > 0) {
-    console.log(`[recon] ${tsResult.warnings.length} TS file(s) skipped due to errors:`);
-    for (const w of tsResult.warnings) {
-      console.log(`  ${w.file}: ${w.reason}`);
-    }
-  }
-
-  // If incremental, carry over unchanged TS symbols from previous index
-  if (previousIndex && tsResult.stats.skipped > 0) {
-    const analyzedTsFiles = new Set(
-      tsResult.result.nodes
-        .filter((n) => n.type === 'File' && n.language === 'typescript')
-        .map((n) => n.file),
-    );
-
-    for (const [, node] of previousIndex.graph.nodes) {
-      if (node.language !== 'typescript') continue;
-      if (node.type === 'File' && analyzedTsFiles.has(node.file)) continue;
-      if (node.type !== 'File' && analyzedTsFiles.has(node.file)) continue;
-      if (!graph.getNode(node.id)) {
-        graph.addNode(node);
-      }
-    }
-
-    for (const rel of previousIndex.graph.allRelationships()) {
-      if (!graph.getRelationship(rel.id)) {
-        if (graph.getNode(rel.sourceId) || graph.getNode(rel.targetId)) {
-          graph.addRelationship(rel);
-        }
-      }
-    }
-  }
-
-  // Tree-sitter analysis: Python, Rust, Java, C, C++
+  // Tree-sitter analysis (TS/TSX now flow through here like every other grammar)
   const tsitterLangs = getAvailableLanguages();
   let tsitterSymbols = 0;
   let tsitterFiles = 0;
@@ -370,8 +274,6 @@ export async function indexCommand(options: { force?: boolean; repo?: string; em
   const git = getGitInfo(projectRoot);
 
   // Count stats
-  const tsFiles = tsResult.stats.files + tsResult.stats.skipped;
-  const tsSymbols = tsResult.stats.components + tsResult.stats.functions;
   const elapsed = Math.round(performance.now() - startTime);
 
   const meta: IndexMeta = {
@@ -380,14 +282,14 @@ export async function indexCommand(options: { force?: boolean; repo?: string; em
     gitCommit: git.commit,
     gitBranch: git.branch,
     stats: {
-      tsModules: tsFiles,
-      tsSymbols,
+      tsModules: 0,
+      tsSymbols: 0,
       treeSitterFiles: tsitterFiles,
       treeSitterSymbols: tsitterSymbols,
       relationships: graph.relationshipCount,
       indexTimeMs: elapsed,
     },
-    fileHashes: { ...tsResult.fileHashes, ...tsitterHashes },
+    fileHashes: { ...tsitterHashes },
     apiRoutes: crossLangResult.routes.map(r => ({
       method: r.method,
       pattern: r.pattern,
@@ -491,10 +393,7 @@ export async function indexCommand(options: { force?: boolean; repo?: string; em
     }
   }
 
-  const summary = [
-    `${tsFiles} TS files`,
-    `${tsSymbols} TS symbols`,
-  ];
+  const summary: string[] = [];
   if (tsitterSymbols > 0) {
     summary.push(`${tsitterFiles} tree-sitter files`, `${tsitterSymbols} tree-sitter symbols`);
   }
@@ -658,8 +557,6 @@ export async function statusCommand(options?: { repo?: string }): Promise<void> 
   console.log(`  Git commit:     ${meta.gitCommit}${stale ? ` (HEAD is ${git.commit} ??STALE)` : ' (current)'}`);
   console.log(`  Git branch:     ${meta.gitBranch}`);
   console.log(`  Tree-sitter:    ${meta.stats.treeSitterFiles || 0} files, ${meta.stats.treeSitterSymbols || 0} symbols`);
-  console.log(`  TS modules:     ${meta.stats.tsModules}`);
-  console.log(`  TS symbols:     ${meta.stats.tsSymbols}`);
   console.log(`  Relationships:  ${meta.stats.relationships}`);
   console.log(`  Total nodes:    ${graph.nodeCount}`);
   console.log(`  Index time:     ${meta.stats.indexTimeMs}ms`);

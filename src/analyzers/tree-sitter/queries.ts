@@ -363,6 +363,61 @@ export const JAVASCRIPT_QUERIES = `
   arguments: (arguments (string (string_fragment) @import.source))) @import
 `;
 
+// ─── TypeScript / TSX ───────────────────────────────────────────
+//
+// Shared by both Language.TypeScript (.ts/.mts/.cts via the `typescript`
+// grammar) and Language.Tsx (.tsx via the `tsx` grammar). Both grammars
+// expose the same node names for these constructs; only the JSX-vs-`<T>`-cast
+// disambiguation differs, which does not affect these queries.
+//
+// Node names verified against tree-sitter-typescript@0.21 by parsing fixtures:
+//   function_declaration / generator_function_declaration name: (identifier)
+//   variable_declarator name: (identifier) value: (arrow_function|function_expression)
+//   class_declaration / abstract_class_declaration name: (type_identifier)  -- NOT identifier
+//   class_body (method_definition name: (property_identifier))
+//   class_heritage (extends_clause value: (identifier))
+//   class_heritage (implements_clause (type_identifier))
+//   interface_declaration / type_alias_declaration name: (type_identifier)
+//   enum_declaration name: (identifier)                                     -- identifier, not type_identifier
+//   import_statement source: (string (string_fragment))
+//   call_expression function: (identifier | member_expression property: (property_identifier))
+//
+// Heritage is wrapped in class_declaration/abstract_class_declaration so each
+// match also carries @heritage.class (the child name) — the extractor requires
+// heritage.class alongside heritage.extends/implements in the same match.
+
+export const TYPESCRIPT_QUERIES = `
+(function_declaration name: (identifier) @name) @definition.function
+(generator_function_declaration name: (identifier) @name) @definition.function
+
+(variable_declarator name: (identifier) @name value: (arrow_function)) @definition.function
+(variable_declarator name: (identifier) @name value: (function_expression)) @definition.function
+
+(class_declaration name: (type_identifier) @name) @definition.class
+(abstract_class_declaration name: (type_identifier) @name) @definition.class
+
+(class_body (method_definition name: (property_identifier) @name)) @definition.method
+
+(interface_declaration name: (type_identifier) @name) @definition.interface
+(type_alias_declaration name: (type_identifier) @name) @definition.type
+(enum_declaration name: (identifier) @name) @definition.enum
+
+(class_declaration name: (type_identifier) @heritage.class
+  (class_heritage (extends_clause value: (identifier) @heritage.extends))) @heritage
+(abstract_class_declaration name: (type_identifier) @heritage.class
+  (class_heritage (extends_clause value: (identifier) @heritage.extends))) @heritage
+
+(class_declaration name: (type_identifier) @heritage.class
+  (class_heritage (implements_clause (type_identifier) @heritage.implements))) @heritage
+(abstract_class_declaration name: (type_identifier) @heritage.class
+  (class_heritage (implements_clause (type_identifier) @heritage.implements))) @heritage
+
+(call_expression function: (identifier) @call.name) @call
+(call_expression function: (member_expression property: (property_identifier) @call.name)) @call
+
+(import_statement source: (string (string_fragment) @import.source)) @import
+`;
+
 // ─── Query Map ──────────────────────────────────────────────────
 
 export const LANGUAGE_QUERIES: Partial<Record<Language, string>> = {
@@ -377,4 +432,6 @@ export const LANGUAGE_QUERIES: Partial<Record<Language, string>> = {
   [Language.Kotlin]: KOTLIN_QUERIES,
   [Language.Swift]: SWIFT_QUERIES,
   [Language.JavaScript]: JAVASCRIPT_QUERIES,
+  [Language.TypeScript]: TYPESCRIPT_QUERIES,
+  [Language.Tsx]: TYPESCRIPT_QUERIES,
 };
